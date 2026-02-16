@@ -880,6 +880,8 @@ export async function handleFeishuMessage(params: {
           }),
       );
 
+      // Wait for all async delivery to complete before cleanup
+      await permDispatcher.waitForIdle();
       markPermIdle();
     }
 
@@ -964,6 +966,8 @@ export async function handleFeishuMessage(params: {
         }),
     );
 
+    // Wait for all async delivery (including streaming) to complete before cleanup
+    await dispatcher.waitForIdle();
     markDispatchIdle();
 
     if (isGroup && historyKey && chatHistories) {

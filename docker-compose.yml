@@ -1,0 +1,127 @@
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: feishu-redis
+    restart: unless-stopped
+    command: redis-server
+    volumes:
+      - redis_data:/data
+    networks:
+      - openclaw-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+
+  openclaw-gateway:
+    image: ${OPENCLAW_IMAGE:-ghcr.io/openclaw/openclaw:main}
+    container_name: openclaw-gateway
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      HOME: ${OPENCLAW_DATA_DIR:-/data/openclaw}
+      OPENCLAW_STATE_DIR: ${OPENCLAW_DATA_DIR:-/data/openclaw}
+      TERM: xterm-256color
+      NODE_ENV: production
+      NODE_OPTIONS: "--max-old-space-size=4096"
+
+      # LLM Provider
+      LLM_PROVIDER: ${LLM_PROVIDER}
+      LLM_BASE_URL: ${LLM_BASE_URL}
+      LLM_API_KEY: ${LLM_API_KEY}
+      LLM_MODEL_ID: ${LLM_MODEL_ID}
+      LLM_API_TYPE: ${LLM_API_TYPE}
+
+      # WeCom
+      WECOM_TOKEN: ${WECOM_TOKEN}
+      WECOM_ENCODING_AES_KEY: ${WECOM_ENCODING_AES_KEY}
+
+      # Feishu
+      FEISHU_APP_ID: ${FEISHU_APP_ID}
+      FEISHU_APP_SECRET: ${FEISHU_APP_SECRET}
+      FEISHU_DOMAIN: ${FEISHU_DOMAIN:-feishu}
+      FEISHU_CONNECTION_MODE: ${FEISHU_CONNECTION_MODE:-websocket}
+      FEISHU_ENABLED: ${FEISHU_ENABLED:-true}
+
+      # Vapi
+      VAPI_API_KEY: ${VAPI_API_KEY}
+      VAPI_PHONE_NUMBER_ID: ${VAPI_PHONE_NUMBER_ID}
+      VAPI_WEBHOOK_URL: ${VAPI_WEBHOOK_URL}
+
+      # Gateway
+      GATEWAY_PORT: ${GATEWAY_PORT:-18789}
+      GATEWAY_MODE: ${GATEWAY_MODE:-local}
+      GATEWAY_BIND: ${GATEWAY_BIND:-lan}
+      GATEWAY_AUTH_TOKEN: ${GATEWAY_AUTH_TOKEN}
+
+      # Other
+      USER_TIMEZONE: ${USER_TIMEZONE:-Asia/Shanghai}
+      TIME_FORMAT: ${TIME_FORMAT:-24}
+
+      # Redis
+      REDIS_ENABLED: ${REDIS_ENABLED:-false}
+      REDIS_HOST: ${REDIS_HOST:-redis}
+      REDIS_PORT: ${REDIS_PORT:-6379}
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_TTL: ${REDIS_TTL:-600}
+
+      # Docker
+      DOCKER_API_VERSION: ${DOCKER_API_VERSION:-1.53}
+
+    # Note: Local plugin mounted to override built-in feishu at /app/extensions/feishu
+    # Plugin dependencies must be installed on host before starting: npm install
+    volumes:
+      - ${OPENCLAW_DATA_DIR:-/data/openclaw}:${OPENCLAW_DATA_DIR:-/data/openclaw}:rw
+      - /root/projects/clawdbot-feishu:/app/extensions/feishu:ro
+      - /odoo19e:/odoo19e:rw
+      - /mnt/d:/mnt/d:rw
+      - /mnt/e:/mnt/e:rw
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    ports:
+      - "${GATEWAY_PORT:-18789}:${GATEWAY_PORT:-18789}"
+      - "18700:18790"
+
+    networks:
+      - openclaw-net
+
+    init: true
+    restart: unless-stopped
+
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+        reservations:
+          memory: 2G
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    user: root:root
+
+    command:
+      - "sh"
+      - "-c"
+      - |
+        if ! command -v docker >/dev/null 2>&1; then
+          echo "Installing docker CLI..."
+          apt-get update -qq && apt-get install -y -qq docker.io >/dev/null 2>&1 && echo "docker installed"
+        fi
+        if ! command -v sudo >/dev/null 2>&1; then
+          echo "Installing sudo..."
+          apt-get install -y -qq sudo >/dev/null 2>&1 && echo "sudo installed"
+        fi
+        exec node dist/index.js gateway --bind "${GATEWAY_BIND:-lan}" --port "${GATEWAY_PORT:-18789}"
+
+networks:
+  openclaw-net:
+    driver: bridge
+
+volumes:
+  redis_data:

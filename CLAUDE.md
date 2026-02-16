@@ -8,7 +8,7 @@ This is a Feishu/Lark (飞书) plugin for [OpenClaw](https://github.com/openclaw
 
 It provides:
 - Feishu channel integration (receive events, route messages, send replies/media/cards)
-- Feishu tool integrations (`feishu_doc`, `feishu_app_scopes`, `feishu_wiki`, `feishu_drive`, `feishu_perm`, `feishu_bitable`)
+- Feishu tool integrations (`feishu_doc`, `feishu_app_scopes`, `feishu_wiki`, `feishu_drive`, `feishu_perm`, `feishu_bitable`, `feishu_task_*`)
 
 ## Development
 
@@ -71,6 +71,11 @@ npx tsc --noEmit
   - `actions.ts` Feishu Bitable API operations
   - `meta.ts` URL parsing + app/table metadata resolution
   - `common.ts` shared types/formatting/error helpers
+- `task-tools/` - Task v2 API implementation:
+  - `register.ts` - Tool registration (`feishu_task_create`, `feishu_task_get`, `feishu_task_update`, `feishu_task_delete`)
+  - `schemas.ts` - Task parameter schemas
+  - `actions.ts` - Task API operations
+  - `common.ts` - Shared types/error helpers
 
 **Supporting Utilities:**
 - `targets.ts` - Normalize `user:xxx`/`chat:xxx` target formats
@@ -82,6 +87,12 @@ npx tsc --noEmit
 - `dynamic-agent.ts` - Auto-create dedicated DM agents (workspace + binding updates)
 - `onboarding.ts` - Channel onboarding adapter
 - `runtime.ts` - Plugin runtime holder/getter
+- `dedup.ts` - Message deduplication (TTL 30min, max 1000 entries)
+
+**Tool Execution Infrastructure:**
+- `tools-common/tool-context.ts` - AsyncLocalStorage-based context propagation for account/session tracking
+- `tools-common/tool-exec.ts` - `withFeishuToolClient` wrapper for account resolution and tool toggle enforcement
+- `tools-common/feishu-api.ts` - Shared API helpers
 
 ### Message Flow
 
@@ -91,6 +102,30 @@ npx tsc --noEmit
 4. `bot.ts` dispatches to OpenClaw runtime using `reply-dispatcher.ts`.
 5. `reply-dispatcher.ts` chooses render path (`raw` text vs markdown card) and sends via `send.ts`.
 6. For outbound tool/API calls, `outbound.ts` sends text/media through `send.ts` and `media.ts`.
+
+### Critical Dispatch Pattern
+
+When dispatching inbound messages in `bot.ts`, **always use `core.channel.reply.dispatchInboundMessage`** instead of `dispatchReplyFromConfig`:
+
+```typescript
+// Correct - waits for async delivery (including streaming) to complete
+await core.channel.reply.dispatchInboundMessage({
+  ctx: ctxPayload,
+  cfg,
+  dispatcher,
+  replyOptions,
+});
+
+// Incorrect - returns immediately, causing premature cleanup
+await core.channel.reply.dispatchReplyFromConfig({...});
+```
+
+`dispatchInboundMessage` wraps the call in `withReplyDispatcher` which:
+1. Calls `dispatcher.markComplete()` to release the reservation
+2. Awaits `dispatcher.waitForIdle()` for all async delivery to complete
+3. Only then returns, allowing `markDispatchIdle()` to safely clean up
+
+Using `dispatchReplyFromConfig` directly causes `markDispatchIdle()` to be called too early, triggering `onIdle` and closing streaming before content is delivered.
 
 ### Key Configuration Options
 
@@ -106,8 +141,9 @@ npx tsc --noEmit
 | `requireMention` | Require @bot in groups (default: true) |
 | `topicSessionMode` | Group topic-thread isolation (`disabled` / `enabled`) |
 | `renderMode` | Reply render mode: `auto` / `raw` / `card` |
+| `streaming` | Enable streaming card updates (default: false) |
 | `dynamicAgentCreation` | Auto-create isolated DM agents/workspaces |
-| `tools` | Tool category switches (`doc`, `wiki`, `drive`, `perm`, `scopes`) |
+| `tools` | Tool category switches (`doc`, `wiki`, `drive`, `perm`, `scopes`, `task`) |
 | `mediaMaxMb` | Max inbound/outbound media size limit |
 
 ### Defaults and Behavior Notes
@@ -117,12 +153,14 @@ npx tsc --noEmit
 - `groupPolicy` defaults to `allowlist`.
 - `requireMention` defaults to `true`.
 - `renderMode` behaves as `auto` when unset at runtime.
+- `streaming` defaults to `false` (rate limit concerns).
 - Tool defaults:
   - `doc: true`
   - `wiki: true`
   - `drive: true`
   - `perm: false` (sensitive)
   - `scopes: true`
+  - `task: true`
 
 ### Feishu SDK Usage
 
@@ -136,4 +174,35 @@ Uses `@larksuiteoapi/node-sdk`. Key APIs:
 - `client.wiki.*` - Wiki space/node operations
 - `client.drive.*` - Drive file and permission operations
 - `client.bitable.*` - Bitable metadata/record operations
+- `client.task.*` - Task v2 API operations
 - `WSClient` + `Lark.adaptDefault(...)` - WebSocket and webhook event delivery
+
+## Tool Development Pattern
+
+When adding new Feishu tools:
+
+1. **Define schema** in a `*-schema.ts` file using `@sinclair/typebox`
+2. **Implement actions** in a `*.ts` file that use the Feishu SDK client
+3. **Register tool** using `withFeishuToolClient` wrapper which:
+   - Resolves the correct account from AsyncLocalStorage context (message-driven) or default
+   - Enforces per-account tool toggles
+   - Creates the Feishu SDK client
+4. **Use `runWithFeishuToolContext`** in `bot.ts` when dispatching to propagate account context
+
+```typescript
+// Pattern from tools-common/tool-exec.ts
+export async function withFeishuToolClient<T>(params: {
+  api: OpenClawPluginApi;
+  toolName: string;
+  requiredTool?: FeishuToolFlag;
+  run: (args: { client: Lark.Client; account: ResolvedFeishuAccount }) => Promise<T>;
+}): Promise<T>
+```
+
+## Streaming Card Implementation
+
+Streaming cards use Feishu's CardKit API (`/cardkit/v1/cards`):
+- `streaming-card.ts` - `FeishuStreamingSession` class manages card lifecycle
+- Requires `streaming: true` in account config
+- Only works with `renderMode: "card"` or `renderMode: "auto"`
+- Throttles updates to 100ms to avoid rate limits
